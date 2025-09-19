@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <domain-config>
-        <domain includeSubdomains="true">example.com</domain>
-        <trust-anchors>
+        <base-config>
             <certificates src="@raw/root_ca"/>
-        </trust-anchors>
+        </base-config>
     </domain-config>
 </network-security-config>
