@@ -120,13 +120,9 @@ enum class BooleanKey(
     SiteRotationManagePump("site_rotation_manage_pump", defaultValue = false),
     SiteRotationManageCgm("site_rotation_manage_cgm", defaultValue = false),
 
-    // Export destination settings
-    ExportAllCloudEnabled("export_all_cloud_enabled", defaultValue = false),
-    ExportLogEmailEnabled("export_log_email_enabled", defaultValue = true),
-    ExportLogCloudEnabled("export_log_cloud_enabled", defaultValue = false),
-    ExportSettingsLocalEnabled("export_settings_local_enabled", defaultValue = true),
-    ExportSettingsCloudEnabled("export_settings_cloud_enabled", defaultValue = false),
-    ExportCsvLocalEnabled("export_csv_local_enabled", defaultValue = true),
-    ExportCsvCloudEnabled("export_csv_cloud_enabled", defaultValue = false),
+// ── β-Cell Plugin ──────────────────────────────────────────────────────
+    BetaCellSmbEnabled("betacell_smb_enabled", true),
+    BetaCellOpenLoop("betacell_open_loop_only", true),
+    BetaCellDebug("betacell_debug_mode", false),
 
 }
