@@ -63,7 +63,13 @@ data class BetaCellPrefs(
     val openLoopOnly: Boolean,  // betacell_open_loop_only     (true = simulation)
     val debugMode   : Boolean,  // betacell_debug_mode
     val hypoAlertMargin : Double,  // betacell_hypo_alert_margin  defaut: 20.0 mg/dL
-    val hypoRapidSlope  : Double   // betacell_hypo_rapid_slope   defaut: -2.0 mg/dL/min
+    val hypoRapidSlope  : Double,  // betacell_hypo_rapid_slope   defaut: -2.0 mg/dL/min
+    // ── Modèle non-linéaire sigmoïde² + CaState ──────────────────────────
+    val useNonLinear    : Boolean, // betacell_use_nonlinear       false=linéaire, true=sigmoïde²
+    val sigmoidSlope    : Double,  // betacell_sigmoid_slope       [0.01–0.20]  défaut 0.05
+    val sigmoidCenter   : Double,  // betacell_sigmoid_center      [80–160]     défaut 110.0
+    val maxSecretion    : Double,  // betacell_max_secretion       [0.5–4.0]    défaut 1.5 U/h
+    val caDecayBraked   : Double   // betacell_ca_decay_braked     [0.40–0.90]  défaut 0.70
 
 ) {
     /** Résumé lisible pour les logs AAPS (mode debug) */

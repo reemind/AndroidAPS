@@ -67,4 +67,8 @@ enum class DoubleKey(
     BetaCellSmbOffset("betacell_smb_threshold_offset", 20.0, 5.0, 60.0),
     BetaCellHypoAlertMargin("betacell_hypo_alert_margin", 20.0, 5.0, 50.0),
     BetaCellHypoRapidSlope("betacell_hypo_rapid_slope", -2.0, -5.0, -0.5),
+    BetaCellSigmoidSlope("betacell_sigmoid_slope", 0.05, 0.01, 0.20),
+    BetaCellSigmoidCenter("betacell_sigmoid_center", 110.0, 80.0, 160.0),
+    BetaCellMaxSecretion("betacell_max_secretion", 1.5, 0.5, 4.0),
+    BetaCellCaDecayBraked("betacell_ca_decay_braked", 0.70, 0.40, 0.90),
 }

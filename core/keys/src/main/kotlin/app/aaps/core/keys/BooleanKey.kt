@@ -124,4 +124,5 @@ enum class BooleanKey(
     BetaCellSmbEnabled("betacell_smb_enabled", true),
     BetaCellOpenLoop("betacell_open_loop_only", true),
     BetaCellDebug("betacell_debug_mode", false),
+    BetaCellUseNonLinear("betacell_use_nonlinear", false),
 }

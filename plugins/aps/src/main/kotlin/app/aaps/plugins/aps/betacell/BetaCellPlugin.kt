@@ -63,6 +63,7 @@ class BetaCellPlugin @Inject constructor(
     override val algorithm: APSResult.Algorithm = APSResult.Algorithm.SMB
     override var lastAPSResult: APSResult? = null
     override var lastAPSRun: Long = 0L
+    private var caState: Double = 0.0   // mémoire Ca²⁺ intracellulaire (persist entre cycles)
     override fun getGlucoseStatusData(allowOldData: Boolean): GlucoseStatus? = glucoseStatusCalculatorSMB.getGlucoseStatusData(allowOldData)
     override fun isEnabled(): Boolean = isEnabled(PluginType.APS)
 
@@ -111,7 +112,12 @@ class BetaCellPlugin @Inject constructor(
         openLoopOnly = preferences.get(BooleanKey.BetaCellOpenLoop),
         debugMode    = preferences.get(BooleanKey.BetaCellDebug),
         hypoAlertMargin = preferences.get(DoubleKey.BetaCellHypoAlertMargin),
-        hypoRapidSlope  = preferences.get(DoubleKey.BetaCellHypoRapidSlope)
+        hypoRapidSlope  = preferences.get(DoubleKey.BetaCellHypoRapidSlope),
+        useNonLinear    = preferences.get(BooleanKey.BetaCellUseNonLinear),
+        sigmoidSlope    = preferences.get(DoubleKey.BetaCellSigmoidSlope),
+        sigmoidCenter   = preferences.get(DoubleKey.BetaCellSigmoidCenter),
+        maxSecretion    = preferences.get(DoubleKey.BetaCellMaxSecretion),
+        caDecayBraked   = preferences.get(DoubleKey.BetaCellCaDecayBraked)
     )
 
     override fun invoke(initiator: String, tempBasalFallback: Boolean) {
@@ -167,8 +173,9 @@ class BetaCellPlugin @Inject constructor(
         isf: Double, p: BetaCellPrefs
     ): BetaCellApsResult {
 
-        // ── Guard hypo absolu ─────────────────────────────────────────
+        // ── Guard hypo absolu ─────────────────────────────────────────────
         if (bg < p.hypoBg) {
+            if (p.useNonLinear) caState = (caState * 0.50).coerceAtLeast(0.0)
             aapsLogger.warn(LTag.APS, "HYPO guard: BG=${bg.roundToInt()} → 0 U")
             return BetaCellApsResult().also { r ->
                 r.rate = 0.0; r.smb = 0.0
@@ -179,26 +186,27 @@ class BetaCellPlugin @Inject constructor(
         }
 
         // ── Pente lissée sur 3 points (anti-bruit CGM) ───────────────────
-        val bgList  = iobCobCalculator.ads.getBgReadingsDataTableCopy()
-        val slope   = when {
-            bgList.size >= 3 -> (bgList[0].value - bgList[2].value) / 10.0  // 10 min
-            bgList.size >= 2 -> (bgList[0].value - bgList[1].value) / 5.0   // 5 min
+        val bgList = iobCobCalculator.ads.getBgReadingsDataTableCopy()
+        val slope  = when {
+            bgList.size >= 3 -> (bgList[0].value - bgList[2].value) / 10.0
+            bgList.size >= 2 -> (bgList[0].value - bgList[1].value) / 5.0
             else             -> bgDelta / dtMin
         }
 
         // ── IOB total = bolus + basal actif ──────────────────────────────
         val iobTotal = iobCobCalculator.calculateIobFromBolus().iob +
-                       iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended().iob
+            iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended().iob
 
         val bgIn30min = bg + slope * 30.0
         val hypoAlert = p.hypoBg + p.hypoAlertMargin
 
         // ── Guard hypo prédictif ──────────────────────────────────────────
-        // Déclenche si projection < seuil ET (IOB actif OU descente rapide)
         val predictiveHypo = bgIn30min < hypoAlert &&
             (iobTotal > 0.0 || slope < p.hypoRapidSlope)
         if (predictiveHypo) {
-            aapsLogger.warn(LTag.APS, "PREDICTIVE HYPO: BG=${bg.roundToInt()} " +
+            if (p.useNonLinear) caState = (caState * 0.60).coerceAtLeast(0.0)
+            aapsLogger.warn(LTag.APS,
+                "PREDICTIVE HYPO: BG=${bg.roundToInt()} " +
                 "slope=${"%.2f".format(slope)} BGin30=${bgIn30min.roundToInt()} " +
                 "IOB=${"%.2f".format(iobTotal)} → 0 U")
             return BetaCellApsResult().also { r ->
@@ -212,55 +220,134 @@ class BetaCellPlugin @Inject constructor(
             }
         }
 
-        // ── Calcul β-cell ─────────────────────────────────────────────────
-        var beta   = if (bg > p.targetBg) ((bg - p.targetBg) / isf) * (dtMin / 60.0) else 0.0
-        val braked = slope < p.slopeBrakeT
-        if (braked) beta *= p.slopeBrakeF
+        // ── Calcul β — switch linéaire / sigmoïde² ────────────────────────
+        var beta       = 0.0
+        var activation = 0.0
+        var caDecay    = 0.85
+        val braked     = slope < p.slopeBrakeT
 
-        // ── Réduction basale graduée ──────────────────────────────────────
-        // gradient linéaire : 0.0 à hypoAlert → 1.0 à hypoAlert+margin
-        val safetyMargin = p.hypoAlertMargin.coerceAtLeast(1.0)
-        val basalFactor = when {
-            bg < p.hypoBg + 5.0              -> 0.0   // très proche hypo → basal=0
-            bgIn30min < hypoAlert            -> 0.0   // projection sous seuil → basal=0
-            bgIn30min < hypoAlert + safetyMargin ->
-                ((bgIn30min - hypoAlert) / safetyMargin).coerceIn(0.0, 1.0)
-            else                             -> 1.0
-        }
-        beta += p.basalPhysio * (dtMin / 60.0) * basalFactor
+        if (p.useNonLinear) {
+            // ── Mode sigmoïde² + CaState ──────────────────────────────────
+            // actRaw  : sigmoïde centrée sur sigmoidCenter (défaut 110 mg/dL)
+            // activation² : quasi-nulle sous 85, montée rapide 110–150,
+            //               plateau au-dessus de 180
+            val actRaw = 1.0 / (1.0 + exp(-p.sigmoidSlope * (bg - p.sigmoidCenter)))
+            activation = actRaw * actRaw
 
-        val systemicInsulin = beta * (1.0 - p.hepatic)
-        val rate = max(0.0, systemicInsulin / (dtMin / 60.0))
+            // CaState : mémoire Ca²⁺ intracellulaire (persist entre cycles)
+            // caDecayBraked < 0.85 → décharge plus rapide si pente négative
+            caDecay = if (braked) p.caDecayBraked else 0.85
+            caState = (caState * caDecay + activation * 0.15).coerceIn(0.0, 1.0)
 
-        // ── SMB bloqué si tendance dangereuse ─────────────────────────────
-        val smbAllowed = p.smbEnabled
-            && bg > p.targetBg + p.smbOffset
-            && bgIn30min > hypoAlert
-            && iobTotal < p.smbMax * 3.0
-        val smb = if (smbAllowed) min(0.3 * systemicInsulin, p.smbMax) else 0.0
+            beta = p.maxSecretion * activation * caState * (dtMin / 60.0)
 
-        val zone = when {
-            bg < p.hypoBg  -> GlucoseZone.HYPO
-            bg > p.hyperBg -> GlucoseZone.HYPER
-            else           -> GlucoseZone.TARGET
-        }
+            // Facteur résistance en hyperglycémie sévère
+            val resistanceFactor = when {
+                bg > 250.0 -> 0.70
+                bg > 200.0 -> 0.85
+                else       -> 1.0
+            }
+            beta *= resistanceFactor
 
-        return BetaCellApsResult().also { r ->
-            r.rate = rate; r.smb = smb
-            r.isTempBasalRequested = rate > 0.0
-            r.duration = 30
-            r.betaSecretion = beta; r.systemicInsulin = systemicInsulin
-            r.isf_used = isf; r.slope_used = slope; r.zone = zone
-            r.reason = buildReason(bg, slope, isf, beta, systemicInsulin, p, braked, basalFactor, bgIn30min, iobTotal)
+            // Extraction hépatique dynamique (augmente quand BG bas)
+            val hepaticDynamic = (p.hepatic - 0.001 * (bg - 100.0)).coerceIn(0.30, 0.70)
+
+            // Plafond absolu de sécurité
+            beta = beta.coerceAtMost(p.maxSecretion * (dtMin / 60.0))
+
+            if (braked) beta *= p.slopeBrakeF
+
+            // Réduction basale graduée en pré-alerte
+            val safetyMargin = p.hypoAlertMargin.coerceAtLeast(1.0)
+            val basalFactor  = when {
+                bg < p.hypoBg + 5.0                  -> 0.0
+                bgIn30min < hypoAlert                -> 0.0
+                bgIn30min < hypoAlert + safetyMargin ->
+                    ((bgIn30min - hypoAlert) / safetyMargin).coerceIn(0.0, 1.0)
+                else                                 -> 1.0
+            }
+            beta += p.basalPhysio * (dtMin / 60.0) * basalFactor
+
+            val systemicInsulin = beta * (1.0 - hepaticDynamic)
+            val rate = max(0.0, systemicInsulin / (dtMin / 60.0))
+
+            val smbAllowed = p.smbEnabled
+                && bg > p.targetBg + p.smbOffset
+                && bg < p.hyperBg
+                && bgIn30min > hypoAlert
+                && iobTotal < p.smbMax * 3.0
+            val smb = if (smbAllowed) min(0.3 * systemicInsulin, p.smbMax) else 0.0
+
+            val zone = when {
+                bg < p.hypoBg  -> GlucoseZone.HYPO
+                bg > p.hyperBg -> GlucoseZone.HYPER
+                else           -> GlucoseZone.TARGET
+            }
+
+            return BetaCellApsResult().also { r ->
+                r.rate = rate; r.smb = smb
+                r.isTempBasalRequested = rate > 0.0
+                r.duration = 30
+                r.betaSecretion = beta; r.systemicInsulin = systemicInsulin
+                r.isf_used = isf; r.slope_used = slope; r.zone = zone
+                r.reason = buildReasonNonLinear(
+                    bg, slope, beta, systemicInsulin,
+                    activation, caState, caDecay, hepaticDynamic,
+                    p, braked, basalFactor, bgIn30min, iobTotal, resistanceFactor
+                )
+            }
+
+        } else {
+            // ── Mode linéaire (original) ──────────────────────────────────
+            beta = if (bg > p.targetBg) ((bg - p.targetBg) / isf) * (dtMin / 60.0) else 0.0
+            if (braked) beta *= p.slopeBrakeF
+
+            val safetyMargin = p.hypoAlertMargin.coerceAtLeast(1.0)
+            val basalFactor  = when {
+                bg < p.hypoBg + 5.0                  -> 0.0
+                bgIn30min < hypoAlert                -> 0.0
+                bgIn30min < hypoAlert + safetyMargin ->
+                    ((bgIn30min - hypoAlert) / safetyMargin).coerceIn(0.0, 1.0)
+                else                                 -> 1.0
+            }
+            beta += p.basalPhysio * (dtMin / 60.0) * basalFactor
+
+            val systemicInsulin = beta * (1.0 - p.hepatic)
+            val rate = max(0.0, systemicInsulin / (dtMin / 60.0))
+
+            val smbAllowed = p.smbEnabled
+                && bg > p.targetBg + p.smbOffset
+                && bgIn30min > hypoAlert
+                && iobTotal < p.smbMax * 3.0
+            val smb = if (smbAllowed) min(0.3 * systemicInsulin, p.smbMax) else 0.0
+
+            val zone = when {
+                bg < p.hypoBg  -> GlucoseZone.HYPO
+                bg > p.hyperBg -> GlucoseZone.HYPER
+                else           -> GlucoseZone.TARGET
+            }
+
+            return BetaCellApsResult().also { r ->
+                r.rate = rate; r.smb = smb
+                r.isTempBasalRequested = rate > 0.0
+                r.duration = 30
+                r.betaSecretion = beta; r.systemicInsulin = systemicInsulin
+                r.isf_used = isf; r.slope_used = slope; r.zone = zone
+                r.reason = buildReasonLinear(
+                    bg, slope, isf, beta, systemicInsulin,
+                    p, braked, basalFactor, bgIn30min, iobTotal
+                )
+            }
         }
     }
 
-    private fun buildReason(
-        bg: Double, slope: Double, isf: Double, beta: Double, systemic: Double,
-        p: BetaCellPrefs, braked: Boolean, basalFactor: Double, bgIn30min: Double,
-        iobTotal: Double
+    private fun buildReasonLinear(
+        bg: Double, slope: Double, isf: Double,
+        beta: Double, systemic: Double,
+        p: BetaCellPrefs, braked: Boolean,
+        basalFactor: Double, bgIn30min: Double, iobTotal: Double
     ): String = buildString {
-        append("BG=${bg.roundToInt()} tgt=${p.targetBg.roundToInt()} ")
+        append("LINEAR BG=${bg.roundToInt()} tgt=${p.targetBg.roundToInt()} ")
         append("ISF=${"%.1f".format(isf)} slope=${"%.2f".format(slope)} ")
         append("BGin30=${bgIn30min.roundToInt()} IOB=${"%.2f".format(iobTotal)}U ")
         if (braked) append("[brake×${p.slopeBrakeF}] ")
@@ -268,6 +355,27 @@ class BetaCellPlugin @Inject constructor(
         append("β=${"%.3f".format(beta)}U sys=${"%.3f".format(systemic)}U ")
         if (p.openLoopOnly) append("[OPEN_LOOP]")
     }
+
+    private fun buildReasonNonLinear(
+        bg: Double, slope: Double,
+        beta: Double, systemic: Double,
+        activation: Double, caState: Double, caDecay: Double, hepatic: Double,
+        p: BetaCellPrefs, braked: Boolean,
+        basalFactor: Double, bgIn30min: Double,
+        iobTotal: Double, resistanceFactor: Double
+    ): String = buildString {
+        append("SIGMOID² BG=${bg.roundToInt()} tgt=${p.targetBg.roundToInt()} ")
+        append("slope=${"%.2f".format(slope)} ")
+        append("BGin30=${bgIn30min.roundToInt()} IOB=${"%.2f".format(iobTotal)}U ")
+        append("act=${"%.3f".format(activation)} Ca=${"%.3f".format(caState)} ")
+        append("caDecay=${"%.2f".format(caDecay)} hep=${"%.2f".format(hepatic)} ")
+        if (braked) append("[brake×${p.slopeBrakeF}] ")
+        if (basalFactor < 1.0) append("[basal×${"%.2f".format(basalFactor)} PRE-ALERT] ")
+        if (resistanceFactor < 1.0) append("[resist×${"%.2f".format(resistanceFactor)}] ")
+        append("β=${"%.3f".format(beta)}U sys=${"%.3f".format(systemic)}U ")
+        if (p.openLoopOnly) append("[OPEN_LOOP]")
+    }
+
 
     override fun addPreferenceScreen(
         preferenceManager: PreferenceManager,
