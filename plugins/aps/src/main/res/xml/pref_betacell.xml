@@ -228,6 +228,53 @@
 
     </PreferenceCategory>
 
+    <!-- ════════════════════════════════════════════════════════════════════
+         CATÉGORIE 4b : Modèle non-linéaire sigmoïde²
+    ════════════════════════════════════════════════════════════════════ -->
+    <PreferenceCategory
+        android:key="betacell_category_nonlinear"
+        android:title="🧬 Modèle sigmoïde² + CaState">
+
+        <SwitchPreference
+            android:key="betacell_use_nonlinear"
+            android:title="Activer le modèle non-linéaire"
+            android:summary="sigmoïde²+CaState au lieu de (bg-tgt)/isf"
+            android:defaultValue="false" />
+
+        <EditTextPreference
+            android:key="betacell_sigmoid_slope"
+            android:title="Pente sigmoïde (k)"
+            android:summary="Raideur de la courbe. Défaut: 0.05"
+            android:defaultValue="0.05"
+            android:inputType="numberDecimal"
+            android:dependency="betacell_use_nonlinear" />
+
+        <EditTextPreference
+            android:key="betacell_sigmoid_center"
+            android:title="Centre sigmoïde (mg/dL)"
+            android:summary="BG au point d'inflexion. Défaut: 110 mg/dL"
+            android:defaultValue="110"
+            android:inputType="numberDecimal"
+            android:dependency="betacell_use_nonlinear" />
+
+        <EditTextPreference
+            android:key="betacell_max_secretion"
+            android:title="Sécrétion maximale (U/h)"
+            android:summary="Plafond β-cellule. Défaut: 1.5 U/h"
+            android:defaultValue="1.5"
+            android:inputType="numberDecimal"
+            android:dependency="betacell_use_nonlinear" />
+
+        <EditTextPreference
+            android:key="betacell_ca_decay_braked"
+            android:title="Décroissance Ca²⁺ en descente"
+            android:summary="Décharge mémoire calcique si pente négative. Défaut: 0.70"
+            android:defaultValue="0.70"
+            android:inputType="numberDecimal"
+            android:dependency="betacell_use_nonlinear" />
+
+    </PreferenceCategory>
+
     <!-- ═══════════════════════════════════════════════════════════════════
          CATÉGORIE 5 : Debug & Logs
     ════════════════════════════════════════════════════════════════════ -->
