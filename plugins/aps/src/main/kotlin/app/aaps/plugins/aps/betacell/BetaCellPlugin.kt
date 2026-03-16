@@ -269,6 +269,16 @@ class BetaCellPlugin @Inject constructor(
 
         val braked = slope < p.slopeBrakeT
 
+
+        // ── Latence bolus : calculée UNE SEULE FOIS, commune aux deux modes ──
+        val lastBolusAgeMs = System.currentTimeMillis() -
+            (iobCobCalculator.ads.lastBolusTime ?: 0L)
+        val recentBolus = lastBolusAgeMs < 3 * 60 * 1000L
+        if (recentBolus) aapsLogger.debug(LTag.APS,
+            "SMB suspended: bolus ${lastBolusAgeMs / 1000}s ago (< 3 min)")
+
+        // ── Switch mode ───────────────────────────────────────────────
+
         return if (p.useNonLinear)
             calcNonLinear(bg, slope, dtMin, isf, iobTotal, bgIn30min, hypoAlert, basalFactor, braked, p)
         else
