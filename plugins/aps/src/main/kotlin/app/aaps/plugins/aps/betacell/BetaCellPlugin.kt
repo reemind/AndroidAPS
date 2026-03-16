@@ -292,6 +292,7 @@ class BetaCellPlugin @Inject constructor(
 
         val smbAllowed = p.smbEnabled
             && bg > p.targetBg + p.smbOffset
+            && bg < p.hyperBg  
             && bgIn30min > hypoAlert
             && iobTotal < p.smbMax * 3.0
         val smb = if (smbAllowed) min(0.3 * systemicInsulin, p.smbMax) else 0.0
