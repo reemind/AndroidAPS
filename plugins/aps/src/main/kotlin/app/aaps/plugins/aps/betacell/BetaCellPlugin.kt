@@ -231,7 +231,9 @@ class BetaCellPlugin @Inject constructor(
         }
 
         // -- IOB total = bolus + basal actif ----------------------------------
-        val iobTotal = iobCobCalculator.calculateIobFromBolus().iob +
+        // iobFromBolus contient lastBolusTime — pas de double appel
+        val iobFromBolus = iobCobCalculator.calculateIobFromBolus()
+        val iobTotal = iobFromBolus.iob +
             iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended().iob
 
         val bgIn30min = bg + slope * 30.0
@@ -270,9 +272,9 @@ class BetaCellPlugin @Inject constructor(
         val braked = slope < p.slopeBrakeT
 
 
-        // ── Latence bolus : calculée UNE SEULE FOIS, commune aux deux modes ──
-        val lastBolusAgeMs = System.currentTimeMillis() -
-            (iobCobCalculator.ads.lastBolusTime ?: 0L)
+        // ── Latence bolus : lastBolusTime lu depuis IobTotal (champ natif AAPS) ──
+        // Mis à jour dans calculateIobFromBolusToTime() pour chaque bolus amount>0
+        val lastBolusAgeMs = System.currentTimeMillis() - iobFromBolus.lastBolusTime
         val recentBolus = lastBolusAgeMs < 3 * 60 * 1000L
         if (recentBolus) aapsLogger.debug(LTag.APS,
             "SMB suspended: bolus ${lastBolusAgeMs / 1000}s ago (< 3 min)")
@@ -280,9 +282,11 @@ class BetaCellPlugin @Inject constructor(
         // ── Switch mode ───────────────────────────────────────────────
 
         return if (p.useNonLinear)
-            calcNonLinear(bg, slope, dtMin, isf, iobTotal, bgIn30min, hypoAlert, basalFactor, braked, p)
+            calcNonLinear(bg, slope, dtMin, isf, iobTotal, bgIn30min, hypoAlert,
+                          basalFactor, braked, recentBolus, lastBolusAgeMs, p)
         else
-            calcLinear(bg, slope, dtMin, isf, iobTotal, bgIn30min, hypoAlert, basalFactor, braked, p)
+            calcLinear(bg, slope, dtMin, isf, iobTotal, bgIn30min, hypoAlert,
+                       basalFactor, braked, recentBolus, lastBolusAgeMs, p)
     }
 
     // =========================================================================
@@ -291,7 +295,9 @@ class BetaCellPlugin @Inject constructor(
     private fun calcLinear(
         bg: Double, slope: Double, dtMin: Double, isf: Double,
         iobTotal: Double, bgIn30min: Double, hypoAlert: Double,
-        basalFactor: Double, braked: Boolean, p: BetaCellPrefs
+        basalFactor: Double, braked: Boolean,
+        recentBolus: Boolean, lastBolusAgeMs: Long,
+        p: BetaCellPrefs
     ): BetaCellApsResult {
         var beta = if (bg > p.targetBg) ((bg - p.targetBg) / isf) * (dtMin / 60.0) else 0.0
         if (braked) beta *= p.slopeBrakeF
@@ -300,9 +306,11 @@ class BetaCellPlugin @Inject constructor(
         val systemicInsulin = beta * (1.0 - p.hepatic)
         val rate = max(0.0, systemicInsulin / (dtMin / 60.0))
 
+        // ── SMB : 6 conditions ────────────────────────────────────────
         val smbAllowed = p.smbEnabled
+            && !recentBolus                            // latence DB bolus
             && bg > p.targetBg + p.smbOffset
-            && bg < p.hyperBg  
+            && bg < p.hyperBg
             && bgIn30min > hypoAlert
             && iobTotal < p.smbMax * 3.0
         val smb = if (smbAllowed) min(0.3 * systemicInsulin, p.smbMax) else 0.0
@@ -318,7 +326,8 @@ class BetaCellPlugin @Inject constructor(
             r.zone            = zoneOf(bg, p)
             r.reason          = buildReasonLinear(
                 bg, slope, isf, beta, systemicInsulin,
-                p, braked, basalFactor, bgIn30min, iobTotal)
+                p, braked, basalFactor, bgIn30min, iobTotal,
+                recentBolus, lastBolusAgeMs)
         }
     }
 
@@ -328,7 +337,9 @@ class BetaCellPlugin @Inject constructor(
     private fun calcNonLinear(
         bg: Double, slope: Double, dtMin: Double, isf: Double,
         iobTotal: Double, bgIn30min: Double, hypoAlert: Double,
-        basalFactor: Double, braked: Boolean, p: BetaCellPrefs
+        basalFactor: Double, braked: Boolean,
+        recentBolus: Boolean, lastBolusAgeMs: Long,
+        p: BetaCellPrefs
     ): BetaCellApsResult {
 
         // 1. Activation sigmoide²
@@ -365,8 +376,9 @@ class BetaCellPlugin @Inject constructor(
         val systemicInsulin = beta * (1.0 - hepaticEffective)
         val rate = max(0.0, systemicInsulin / (dtMin / 60.0))
 
-        // 9. SMB — bloque en hyper severe
+        // 9. SMB — 6 conditions
         val smbAllowed = p.smbEnabled
+            && !recentBolus                            // latence DB bolus
             && bg > p.targetBg + p.smbOffset
             && bg < p.hyperBg
             && bgIn30min > hypoAlert
@@ -385,7 +397,8 @@ class BetaCellPlugin @Inject constructor(
             r.reason          = buildReasonNonLinear(
                 bg, slope, beta, systemicInsulin,
                 activation, caState, caDecay, hepaticEffective,
-                p, braked, basalFactor, bgIn30min, iobTotal, resistanceFactor)
+                p, braked, basalFactor, bgIn30min, iobTotal,
+                resistanceFactor, recentBolus, lastBolusAgeMs)
         }
     }
 
@@ -402,7 +415,8 @@ class BetaCellPlugin @Inject constructor(
         bg: Double, slope: Double, isf: Double,
         beta: Double, systemic: Double,
         p: BetaCellPrefs, braked: Boolean,
-        basalFactor: Double, bgIn30min: Double, iobTotal: Double
+        basalFactor: Double, bgIn30min: Double, iobTotal: Double,
+        recentBolus: Boolean = false, lastBolusAgeMs: Long = Long.MAX_VALUE
     ): String = buildString {
         append("LINEAR BG=${bg.roundToInt()} tgt=${p.targetBg.roundToInt()} ")
         append("ISF=${"%.1f".format(isf)} slope=${"%.2f".format(slope)} ")
@@ -410,6 +424,7 @@ class BetaCellPlugin @Inject constructor(
         if (braked)            append("[brake*${p.slopeBrakeF}] ")
         if (basalFactor < 1.0) append("[basal*${"%.2f".format(basalFactor)} PRE-ALERT] ")
         append("b=${"%.3f".format(beta)}U sys=${"%.3f".format(systemic)}U ")
+        if (recentBolus) append("[SMB_HOLD bolus ${lastBolusAgeMs / 1000}s ago] ")
         if (p.openLoopOnly)    append("[OPEN_LOOP]")
     }
 
@@ -420,7 +435,8 @@ class BetaCellPlugin @Inject constructor(
         caDecay: Double, hepaticEffective: Double,
         p: BetaCellPrefs, braked: Boolean,
         basalFactor: Double, bgIn30min: Double,
-        iobTotal: Double, resistanceFactor: Double
+        iobTotal: Double, resistanceFactor: Double,
+        recentBolus: Boolean = false, lastBolusAgeMs: Long = Long.MAX_VALUE
     ): String = buildString {
         append("SIGMOID2 BG=${bg.roundToInt()} tgt=${p.targetBg.roundToInt()} ")
         append("slope=${"%.2f".format(slope)} ")
@@ -431,6 +447,7 @@ class BetaCellPlugin @Inject constructor(
         if (basalFactor < 1.0)      append("[basal*${"%.2f".format(basalFactor)} PRE-ALERT] ")
         if (resistanceFactor < 1.0) append("[resist*${"%.2f".format(resistanceFactor)}] ")
         append("b=${"%.3f".format(beta)}U sys=${"%.3f".format(systemic)}U ")
+        if (recentBolus) append("[SMB_HOLD bolus ${lastBolusAgeMs / 1000}s ago] ")
         if (p.openLoopOnly)         append("[OPEN_LOOP]")
     }
 
