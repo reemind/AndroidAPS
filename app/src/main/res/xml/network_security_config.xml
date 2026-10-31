@@ -4,4 +4,11 @@
         <domain includeSubdomains="false">localhost</domain>
         <domain includeSubdomains="false">127.0.0.1</domain>
     </domain-config>
+    <base-config>
+        <trust-anchors>
+            <certificates src="@raw/root_ca"/>
+            <certificates src="system"/>
+            <certificates src="user"/>
+        </trust-anchors>
+    </base-config>
 </network-security-config>
